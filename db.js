@@ -73,7 +73,8 @@ const defaultData = {
     googleDrive: {
       cuenta: null,
       carpetaBase: "SecureCam Drive",
-      conectado: false
+      conectado: false,
+      refreshToken: null
     }
   },
   usuarios: [
