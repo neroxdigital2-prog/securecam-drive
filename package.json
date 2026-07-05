@@ -1,0 +1,19 @@
+{
+  "name": "securecam-backend",
+  "version": "1.0.0",
+  "description": "SecureCam Drive - API REST + WebSocket para gestionar cámaras, eventos y usuarios",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.19.2",
+    "lowdb": "^7.0.1",
+    "multer": "^2.0.0",
+    "nanoid": "^5.0.7",
+    "ws": "^8.17.0"
+  }
+}
