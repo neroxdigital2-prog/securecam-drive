@@ -8,7 +8,11 @@ const CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
 const CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET;
 const REDIRECT_URI = process.env.GOOGLE_REDIRECT_URI; // ej: https://tu-app.onrender.com/api/settings/google-drive/callback
 
-const SCOPES = ["https://www.googleapis.com/auth/drive.file"];
+const SCOPES = [
+  "openid",
+  "https://www.googleapis.com/auth/userinfo.email",
+  "https://www.googleapis.com/auth/drive.file"
+];
 
 function newOAuthClient() {
   if (!CLIENT_ID || !CLIENT_SECRET || !REDIRECT_URI) {
