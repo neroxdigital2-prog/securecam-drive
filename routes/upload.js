@@ -1,8 +1,10 @@
 import { Router } from "express";
 import multer from "multer";
 import path from "path";
+import fs from "fs";
 import { fileURLToPath } from "url";
 import { getDb } from "../db.js";
+import { uploadClipToDrive } from "../googleDrive.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const upload = multer({ dest: path.join(__dirname, "..", "tmp_uploads") });
@@ -11,8 +13,8 @@ export const uploadRouter = Router();
 
 // POST /api/upload
 // El Bridge envía aquí el archivo MP4 grabado junto al eventId asociado.
-// El backend se encarga de reenviarlo a la cuenta de Google Drive del
-// usuario (vía la API de Drive) y de actualizar el estado del evento.
+// Lo subimos a la cuenta de Google Drive conectada, dentro de
+// SecureCam Drive/<cámara>/<año>/<mes>/<día>/, y actualizamos el evento.
 uploadRouter.post("/", upload.single("archivo"), async (req, res) => {
   const { eventId } = req.body;
   if (!req.file) return res.status(400).json({ error: "Falta el archivo 'archivo'" });
@@ -20,24 +22,49 @@ uploadRouter.post("/", upload.single("archivo"), async (req, res) => {
 
   const db = await getDb();
   const idx = db.data.events.findIndex((e) => e.id === eventId);
-
-  // TODO: integrar con Google Drive API (OAuth2) para subir req.file.path
-  // a la carpeta SecureCam Drive/<cámara>/<año>/<mes>/<día>/
-  const rutaDrive = idx !== -1
-    ? `${db.data.settings.googleDrive.carpetaBase}/${db.data.events[idx].camara}/${db.data.events[idx].fecha.replace(/-/g, "/")}/${req.file.originalname}`
-    : null;
-
-  if (idx !== -1) {
-    db.data.events[idx].driveEstado = "subido";
-    db.data.events[idx].driveRuta = rutaDrive;
-    await db.write();
-    req.app.get("broadcast")?.({ type: "event_updated", event: db.data.events[idx] });
+  if (idx === -1) {
+    fs.unlink(req.file.path, () => {});
+    return res.status(404).json({ error: "Evento no encontrado" });
   }
 
-  res.json({
-    ok: true,
-    archivo: req.file.originalname,
-    tamano: req.file.size,
-    driveRuta: rutaDrive
-  });
+  if (!db.data.settings.googleDrive.conectado) {
+    fs.unlink(req.file.path, () => {});
+    return res.status(409).json({ error: "Google Drive no está conectado. Ve a Ajustes y conecta tu cuenta." });
+  }
+
+  try {
+    const evento = db.data.events[idx];
+    const resultado = await uploadClipToDrive({
+      localPath: req.file.path,
+      filename: req.file.originalname || `${evento.id}.mp4`,
+      carpetaBase: db.data.settings.googleDrive.carpetaBase,
+      camara: evento.camara,
+      fecha: evento.fecha
+    });
+
+    db.data.events[idx].driveEstado = "subido";
+    db.data.events[idx].driveRuta = resultado.ruta;
+    db.data.events[idx].driveFileId = resultado.fileId;
+    db.data.events[idx].driveLink = resultado.webViewLink;
+
+    // Borra la copia local temporal según la preferencia de Ajustes.
+    if (db.data.settings.eliminarLocal !== false) {
+      fs.unlink(req.file.path, () => {});
+    }
+
+    await db.write();
+    req.app.get("broadcast")?.({ type: "event_updated", event: db.data.events[idx] });
+
+    res.json({
+      ok: true,
+      archivo: req.file.originalname,
+      tamano: req.file.size,
+      driveRuta: resultado.ruta,
+      driveLink: resultado.webViewLink
+    });
+  } catch (err) {
+    console.error("Error subiendo a Google Drive:", err);
+    fs.unlink(req.file.path, () => {});
+    res.status(500).json({ error: `No se pudo subir a Google Drive: ${err.message}` });
+  }
 });
