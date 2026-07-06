@@ -1,12 +1,10 @@
 import { google } from "googleapis";
 import fs from "fs";
-import { getDb } from "./db.js";
+import { getPool } from "./db.js";
 
-// Estas tres variables se configuran como "Environment Variables" en Render
-// (o en un archivo .env local). Ver README-GOOGLE-DRIVE.md para el paso a paso.
 const CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
 const CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET;
-const REDIRECT_URI = process.env.GOOGLE_REDIRECT_URI; // ej: https://tu-app.onrender.com/api/settings/google-drive/callback
+const REDIRECT_URI = process.env.GOOGLE_REDIRECT_URI;
 
 const SCOPES = [
   "openid",
@@ -23,18 +21,15 @@ function newOAuthClient() {
   return new google.auth.OAuth2(CLIENT_ID, CLIENT_SECRET, REDIRECT_URI);
 }
 
-// Construye la URL a la que mandamos al usuario para que autorice el acceso.
 export function getAuthUrl() {
   const client = newOAuthClient();
   return client.generateAuthUrl({
-    access_type: "offline", // necesario para recibir un refresh_token
-    prompt: "consent", // fuerza a que siempre entregue refresh_token
+    access_type: "offline",
+    prompt: "consent",
     scope: SCOPES
   });
 }
 
-// Intercambia el "code" que Google manda de vuelta por tokens reales,
-// y los guarda en la base de datos junto con el email de la cuenta.
 export async function handleOAuthCallback(code) {
   const client = newOAuthClient();
   const { tokens } = await client.getToken(code);
@@ -43,31 +38,33 @@ export async function handleOAuthCallback(code) {
   const oauth2 = google.oauth2({ auth: client, version: "v2" });
   const { data: perfil } = await oauth2.userinfo.get();
 
-  const db = await getDb();
-  db.data.settings.googleDrive = {
-    ...db.data.settings.googleDrive,
-    conectado: true,
-    cuenta: perfil.email,
-    refreshToken: tokens.refresh_token ?? db.data.settings.googleDrive.refreshToken
-  };
-  await db.write();
+  const pool = getPool();
+  if (tokens.refresh_token) {
+    await pool.query(
+      "UPDATE settings SET gd_conectado = 1, gd_cuenta = ?, gd_refreshToken = ? WHERE id = 1",
+      [perfil.email, tokens.refresh_token]
+    );
+  } else {
+    // Google no siempre reenvía el refresh_token si ya existía uno; conservamos el guardado.
+    await pool.query(
+      "UPDATE settings SET gd_conectado = 1, gd_cuenta = ? WHERE id = 1",
+      [perfil.email]
+    );
+  }
 
   return perfil.email;
 }
 
-// Reconstruye un cliente autorizado a partir del refresh_token guardado.
 async function getAuthorizedClient() {
-  const db = await getDb();
-  const refreshToken = db.data.settings.googleDrive.refreshToken;
-  if (!refreshToken) {
+  const [[fila]] = await getPool().query("SELECT gd_refreshToken FROM settings WHERE id = 1");
+  if (!fila?.gd_refreshToken) {
     throw new Error("Google Drive no está conectado (sin refresh token guardado)");
   }
   const client = newOAuthClient();
-  client.setCredentials({ refresh_token: refreshToken });
+  client.setCredentials({ refresh_token: fila.gd_refreshToken });
   return client;
 }
 
-// Busca una carpeta por nombre dentro de un padre; si no existe, la crea.
 async function ensureFolder(drive, name, parentId) {
   const query = [
     `name='${name.replace(/'/g, "\\'")}'`,
@@ -90,8 +87,6 @@ async function ensureFolder(drive, name, parentId) {
   return creada.id;
 }
 
-// Crea (o reutiliza) la ruta completa SecureCam Drive/<cámara>/<año>/<mes>/<día>/
-// y devuelve el id de la carpeta final.
 async function ensureFolderPath(drive, parts) {
   let parentId = undefined;
   for (const part of parts) {
@@ -100,7 +95,6 @@ async function ensureFolderPath(drive, parts) {
   return parentId;
 }
 
-// Sube un archivo local a la ruta de carpetas indicada y devuelve el link.
 export async function uploadClipToDrive({ localPath, filename, carpetaBase, camara, fecha }) {
   const client = await getAuthorizedClient();
   const drive = google.drive({ version: "v3", auth: client });
