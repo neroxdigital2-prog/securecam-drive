@@ -1,38 +1,25 @@
 import { Router } from "express";
 import { nanoid } from "nanoid";
-import { getDb } from "../db.js";
+import { getPool } from "../db.js";
 
 export const camerasRouter = Router();
 
 // GET /api/cameras
 camerasRouter.get("/", async (req, res) => {
-  const db = await getDb();
-  res.json(db.data.cameras);
+  const [rows] = await getPool().query("SELECT * FROM cameras");
+  res.json(rows);
 });
 
 // GET /api/cameras/:id
 camerasRouter.get("/:id", async (req, res) => {
-  const db = await getDb();
-  const camara = db.data.cameras.find((c) => c.id === req.params.id);
-  if (!camara) return res.status(404).json({ error: "Cámara no encontrada" });
-  res.json(camara);
+  const [rows] = await getPool().query("SELECT * FROM cameras WHERE id = ?", [req.params.id]);
+  if (rows.length === 0) return res.status(404).json({ error: "Cámara no encontrada" });
+  res.json(rows[0]);
 });
 
 // POST /api/cameras
 camerasRouter.post("/", async (req, res) => {
-  const db = await getDb();
-  const {
-    nombre,
-    ip,
-    puerto,
-    usuario,
-    contrasena,
-    fabricante,
-    modelo,
-    rtsp,
-    onvif
-  } = req.body;
-
+  const { nombre, ip, puerto, usuario, contrasena, fabricante, modelo, rtsp, onvif } = req.body;
   if (!nombre || !ip) {
     return res.status(400).json({ error: "nombre e ip son obligatorios" });
   }
@@ -47,46 +34,54 @@ camerasRouter.post("/", async (req, res) => {
     fabricante: fabricante ?? "Desconocido",
     modelo: modelo ?? "",
     rtsp: rtsp ?? `rtsp://${ip}:${puerto ?? 554}/stream1`,
-    onvif: onvif ?? false,
+    onvif: onvif ? 1 : 0,
     estado: "pendiente"
   };
 
-  db.data.cameras.push(nuevaCamara);
-  await db.write();
+  await getPool().query(
+    `INSERT INTO cameras (id, nombre, ip, puerto, usuario, contrasena, fabricante, modelo, rtsp, onvif, estado)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      nuevaCamara.id, nuevaCamara.nombre, nuevaCamara.ip, nuevaCamara.puerto,
+      nuevaCamara.usuario, nuevaCamara.contrasena, nuevaCamara.fabricante,
+      nuevaCamara.modelo, nuevaCamara.rtsp, nuevaCamara.onvif, nuevaCamara.estado
+    ]
+  );
 
   req.app.get("broadcast")?.({ type: "camera_added", camera: nuevaCamara });
   res.status(201).json(nuevaCamara);
 });
 
-// PUT /api/cameras/:id — actualizar datos de una cámara
+// PUT /api/cameras/:id
 camerasRouter.put("/:id", async (req, res) => {
-  const db = await getDb();
-  const idx = db.data.cameras.findIndex((c) => c.id === req.params.id);
-  if (idx === -1) return res.status(404).json({ error: "Cámara no encontrada" });
+  const pool = getPool();
+  const [existentes] = await pool.query("SELECT * FROM cameras WHERE id = ?", [req.params.id]);
+  if (existentes.length === 0) return res.status(404).json({ error: "Cámara no encontrada" });
 
-  db.data.cameras[idx] = { ...db.data.cameras[idx], ...req.body };
-  await db.write();
-  req.app.get("broadcast")?.({ type: "camera_updated", camera: db.data.cameras[idx] });
-  res.json(db.data.cameras[idx]);
+  const actualizada = { ...existentes[0], ...req.body };
+  await pool.query(
+    `UPDATE cameras SET nombre=?, ip=?, puerto=?, usuario=?, contrasena=?, fabricante=?, modelo=?, rtsp=?, onvif=?, estado=? WHERE id=?`,
+    [
+      actualizada.nombre, actualizada.ip, actualizada.puerto, actualizada.usuario,
+      actualizada.contrasena, actualizada.fabricante, actualizada.modelo,
+      actualizada.rtsp, actualizada.onvif ? 1 : 0, actualizada.estado, req.params.id
+    ]
+  );
+
+  req.app.get("broadcast")?.({ type: "camera_updated", camera: actualizada });
+  res.json(actualizada);
 });
 
 // DELETE /api/cameras/:id
 camerasRouter.delete("/:id", async (req, res) => {
-  const db = await getDb();
-  const before = db.data.cameras.length;
-  db.data.cameras = db.data.cameras.filter((c) => c.id !== req.params.id);
-  await db.write();
+  const [resultado] = await getPool().query("DELETE FROM cameras WHERE id = ?", [req.params.id]);
+  if (resultado.affectedRows === 0) return res.status(404).json({ error: "Cámara no encontrada" });
 
-  if (db.data.cameras.length === before) {
-    return res.status(404).json({ error: "Cámara no encontrada" });
-  }
   req.app.get("broadcast")?.({ type: "camera_removed", id: req.params.id });
   res.status(204).end();
 });
 
-// POST /api/cameras/discover — simula el descubrimiento ONVIF/LAN
-// En producción esta acción la realiza el SecureCam Bridge en la tablet,
-// que escanea la LAN y reporta aquí los resultados vía WebSocket.
+// POST /api/cameras/discover — delegado al Bridge (sin cambios de comportamiento)
 camerasRouter.post("/discover", async (req, res) => {
   res.json({
     mensaje:
@@ -95,12 +90,10 @@ camerasRouter.post("/discover", async (req, res) => {
   });
 });
 
-// POST /api/cameras/:id/test — probar conexión RTSP/ONVIF
+// POST /api/cameras/:id/test
 camerasRouter.post("/:id/test", async (req, res) => {
-  const db = await getDb();
-  const camara = db.data.cameras.find((c) => c.id === req.params.id);
-  if (!camara) return res.status(404).json({ error: "Cámara no encontrada" });
+  const [rows] = await getPool().query("SELECT * FROM cameras WHERE id = ?", [req.params.id]);
+  if (rows.length === 0) return res.status(404).json({ error: "Cámara no encontrada" });
 
-  // Placeholder: la prueba real la ejecuta el Bridge contra la LAN.
-  res.json({ camaraId: camara.id, resultado: "pendiente_de_bridge" });
+  res.json({ camaraId: rows[0].id, resultado: "pendiente_de_bridge" });
 });

@@ -3,7 +3,7 @@ import multer from "multer";
 import path from "path";
 import fs from "fs";
 import { fileURLToPath } from "url";
-import { getDb } from "../db.js";
+import { getPool } from "../db.js";
 import { uploadClipToDrive } from "../googleDrive.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -12,48 +12,45 @@ const upload = multer({ dest: path.join(__dirname, "..", "tmp_uploads") });
 export const uploadRouter = Router();
 
 // POST /api/upload
-// El Bridge envía aquí el archivo MP4 grabado junto al eventId asociado.
-// Lo subimos a la cuenta de Google Drive conectada, dentro de
-// SecureCam Drive/<cámara>/<año>/<mes>/<día>/, y actualizamos el evento.
 uploadRouter.post("/", upload.single("archivo"), async (req, res) => {
   const { eventId } = req.body;
   if (!req.file) return res.status(400).json({ error: "Falta el archivo 'archivo'" });
   if (!eventId) return res.status(400).json({ error: "Falta eventId" });
 
-  const db = await getDb();
-  const idx = db.data.events.findIndex((e) => e.id === eventId);
-  if (idx === -1) {
+  const pool = getPool();
+  const [eventos] = await pool.query("SELECT * FROM events WHERE id = ?", [eventId]);
+  if (eventos.length === 0) {
     fs.unlink(req.file.path, () => {});
     return res.status(404).json({ error: "Evento no encontrado" });
   }
+  const evento = eventos[0];
 
-  if (!db.data.settings.googleDrive.conectado) {
+  const [[settingsRow]] = await pool.query("SELECT gd_conectado, gd_carpetaBase, eliminarLocal FROM settings WHERE id = 1");
+  if (!settingsRow.gd_conectado) {
     fs.unlink(req.file.path, () => {});
     return res.status(409).json({ error: "Google Drive no está conectado. Ve a Ajustes y conecta tu cuenta." });
   }
 
   try {
-    const evento = db.data.events[idx];
     const resultado = await uploadClipToDrive({
       localPath: req.file.path,
       filename: req.file.originalname || `${evento.id}.mp4`,
-      carpetaBase: db.data.settings.googleDrive.carpetaBase,
+      carpetaBase: settingsRow.gd_carpetaBase,
       camara: evento.camara,
-      fecha: evento.fecha
+      fecha: evento.fecha instanceof Date ? evento.fecha.toISOString().slice(0, 10) : evento.fecha
     });
 
-    db.data.events[idx].driveEstado = "subido";
-    db.data.events[idx].driveRuta = resultado.ruta;
-    db.data.events[idx].driveFileId = resultado.fileId;
-    db.data.events[idx].driveLink = resultado.webViewLink;
+    await pool.query(
+      "UPDATE events SET driveEstado = 'subido', driveRuta = ?, driveFileId = ?, driveLink = ? WHERE id = ?",
+      [resultado.ruta, resultado.fileId, resultado.webViewLink, eventId]
+    );
 
-    // Borra la copia local temporal según la preferencia de Ajustes.
-    if (db.data.settings.eliminarLocal !== false) {
+    if (settingsRow.eliminarLocal) {
       fs.unlink(req.file.path, () => {});
     }
 
-    await db.write();
-    req.app.get("broadcast")?.({ type: "event_updated", event: db.data.events[idx] });
+    const [[eventoActualizado]] = await pool.query("SELECT * FROM events WHERE id = ?", [eventId]);
+    req.app.get("broadcast")?.({ type: "event_updated", event: eventoActualizado });
 
     res.json({
       ok: true,
